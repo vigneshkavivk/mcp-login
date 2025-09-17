@@ -15,7 +15,7 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "mcp_auth")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
 
-# load backend mapping
+# Load backend mapping
 with open("mcp_backends.json", "r") as f:
     BACKENDS = json.load(f)
 
@@ -84,7 +84,7 @@ def my_servers(username: str):
 async def mcp_handler(request: Request):
     """
     Expects JSON-RPC body. The client should call gateway with ?target=<servername>
-    and include 'session_id' in the JSON-RPC body (client attaches automatically).
+    and include 'session_id' in the JSON-RPC body.
     """
     target = request.query_params.get("target")
     body = await request.json()
@@ -114,11 +114,9 @@ async def mcp_handler(request: Request):
 
     # Forward request to backend MCP server
     try:
-        # optionally add forwarded-user header
-        headers = {"X-Forwarded-User": username}
+        headers = {"X-Forwarded-User": username, "Content-Type": "application/json"}
         resp = requests.post(backend_url, json=body, headers=headers, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
-        # return backend response as-is (JSON-RPC)
         try:
             return JSONResponse(content=resp.json(), status_code=resp.status_code)
         except Exception:
