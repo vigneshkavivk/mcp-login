@@ -1,0 +1,7 @@
+{
+  "servers": [
+    {"name": "jenkins", "url": "http://localhost:8080/mcp?target=jenkins", "description": "Jenkins via Gateway"},
+    {"name": "kubernetes", "url": "http://localhost:8080/mcp?target=kubernetes", "description": "Kubernetes via Gateway"},
+    {"name": "argocd", "url": "http://localhost:8080/mcp?target=argocd", "description": "ArgoCD via Gateway"}
+  ]
+}
