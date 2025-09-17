@@ -1,5 +1,5 @@
 {
   "jenkins": "http://localhost:3001/mcp",
   "kubernetes": "http://localhost:3002/mcp",
-  "argocd": "http://localhost:3003/mcp"
+  "argocd": "http://54.227.78.211:3000/mcp"
 }

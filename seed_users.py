@@ -31,7 +31,12 @@ MONGO_URI_ESCAPED = urlunparse((
 ))
 
 # Connect
-client = MongoClient(MONGO_URI_ESCAPED)
+# Connect with TLS + system CA bundle
+client = MongoClient(
+    MONGO_URI_ESCAPED,
+    tls=True,
+    tlsCAFile="/etc/ssl/certs/ca-certificates.crt"
+)
 db = client[DB_NAME]
 users = db.users
 
