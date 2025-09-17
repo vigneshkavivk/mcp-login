@@ -2,7 +2,7 @@ import os
 from pymongo import MongoClient
 from passlib.hash import bcrypt
 from dotenv import load_dotenv
-import urllib.parse
+from urllib.parse import quote_plus
 
 load_dotenv()
 
@@ -10,30 +10,28 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME")
 
-# Parse and reconstruct URI with escaped username/password
+# Escape username and password if they exist
 from urllib.parse import urlparse, urlunparse
 
 parsed = urlparse(MONGO_URI)
+username = quote_plus(parsed.username) if parsed.username else ""
+password = quote_plus(parsed.password) if parsed.password else ""
+host = parsed.hostname
+port = f":{parsed.port}" if parsed.port else ""
+netloc = f"{username}:{password}@{host}{port}" if username and password else f"{host}{port}"
 
-# If there's a username/password, escape them
-if parsed.username or parsed.password:
-    username = urllib.parse.quote_plus(parsed.username) if parsed.username else ""
-    password = urllib.parse.quote_plus(parsed.password) if parsed.password else ""
-    netloc = f"{username}:{password}@{parsed.hostname}"
-    if parsed.port:
-        netloc += f":{parsed.port}"
-    # Rebuild URI
-    MONGO_URI = urlunparse((
-        parsed.scheme,
-        netloc,
-        parsed.path,
-        parsed.params,
-        parsed.query,
-        parsed.fragment
-    ))
+# Rebuild full URI including query
+MONGO_URI_ESCAPED = urlunparse((
+    parsed.scheme,
+    netloc,
+    parsed.path or "",
+    parsed.params or "",
+    parsed.query or "",
+    parsed.fragment or ""
+))
 
-# Now connect
-client = MongoClient(MONGO_URI)
+# Connect
+client = MongoClient(MONGO_URI_ESCAPED)
 db = client[DB_NAME]
 users = db.users
 
