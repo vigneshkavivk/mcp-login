@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pymongo
+passlib[bcrypt]
+python-dotenv
+requests
+streamlit
+google-generativeai
