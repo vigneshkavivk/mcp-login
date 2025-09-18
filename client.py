@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any
 # ---------------- CONFIG ----------------
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBYRBa7dQ5atjlHk7e3IOdZBdo6OOcn2Pk")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
 GEMINI_AVAILABLE = False
@@ -209,7 +209,7 @@ def main():
             tool_name = decision.get("tool")
             if tool_name:
                 tool_args = decision.get("args") or {}
-                st.chat_message("assistant").markdown(f"🔧 Executing {tool_name} on server {server_name} with arguments:\n```json\n{json.dumps(tool_args, indent=2)}\n```")
+                st.chat_message("assistant").markdown(f"🔧 Executing {tool_name} on server {server_name} with arguments:\njson\n{json.dumps(tool_args, indent=2)}\n")
                 resp = call_tool(tool_name, tool_args, server_url=server_url)
                 final_answer = ask_gemini_answer(user_prompt, resp)
                 st.session_state.messages.append({"role": "assistant", "content": final_answer})
@@ -221,4 +221,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

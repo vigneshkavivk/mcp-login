@@ -1,7 +1,7 @@
 {
   "servers": [
     {"name": "jenkins", "url": "http://3.80.48.199:8080/mcp?target=jenkins", "description": "Jenkins via Gateway"},
-    {"name": "kubernetes", "url": "http://13.221.252.52:3000/mcp?target=kubernetes", "description": "Kubernetes via Gateway"},
-    {"name": "argocd", "url": "http://54.227.78.211:3000/mcp?target=argocd", "description": "ArgoCD via Gateway"}
+    {"name": "kubernetes", "url": "http://13.222.157.210:3000/mcp?target=kubernetes", "description": "Kubernetes via Gateway"},
+    {"name": "argocd", "url": "http://54.227.78.211:8083/mcp?target=argocd", "description": "ArgoCD via Gateway"}
   ]
 }

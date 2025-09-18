@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # optional .env for MONGO_URI, REQUEST_TIMEOUT
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://vigneshkavi_db_user:admin123@mcp.cautaos.mongodb.net/mcp_auth?retryWrites=true&w=majority")
 DB_NAME = os.getenv("DB_NAME", "mcp_auth")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
 
@@ -43,6 +43,12 @@ def create_session(username: str):
     })
     return session_id
 
+def get_or_create_session(username: str):
+    existing = sessions_col.find_one({"username": username})
+    if existing:
+        return existing["session_id"]
+    return create_session(username)
+
 def verify_session(session_id: str):
     session = sessions_col.find_one({"session_id": session_id})
     if not session:
@@ -63,8 +69,17 @@ def login(req: LoginRequest):
     user = users_col.find_one({"username": req.username})
     if not user or not pwd_context.verify(req.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    session_id = create_session(req.username)
+    session_id = get_or_create_session(req.username)
     return {"session_id": session_id, "allowed_servers": user.get("servers", [])}
+
+@app.post("/logout")
+def logout(req: LoginRequest):
+    user = users_col.find_one({"username": req.username})
+    if not user or not pwd_context.verify(req.password, user["password"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    sessions_col.delete_one({"username": req.username})
+    return {"msg": f"User {req.username} logged out, session cleared"}
 
 @app.post("/assign_server/{username}")
 def assign_server(username: str, server: str):
@@ -123,3 +138,20 @@ async def mcp_handler(request: Request):
             return JSONResponse(content={"text": resp.text}, status_code=resp.status_code)
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Gateway forwarding failed: {str(e)}")
+@app.post("/mcp/{backend}/{action}")
+async def forward_request(backend: str, action: str, request: Request):
+    session_user = request.session.get("user")
+    if not session_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    allowed = session_user.get("access", [])
+    if backend not in allowed:
+        return JSONResponse(
+            status_code=403,
+            content={"error": f"🚫 User '{session_user['username']}' not allowed to access '{backend}'"}
+        )
+
+    server_url = SERVERS[backend]
+    resp = requests.post(f"{server_url}/{action}", json=await request.json())
+    return JSONResponse(content=resp.json())
+
