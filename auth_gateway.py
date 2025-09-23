@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ---------------- CONFIG ----------------
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://vigneshkavi_db_user:admin123@mcp.cautaos.mongodb.net/mcp_auth?retryWrites=true&w=majority")
 DB_NAME = os.getenv("DB_NAME", "mcp_auth")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
 
