@@ -5,7 +5,7 @@ import json
 import uuid
 import requests
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from pymongo import MongoClient
@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------------- CONFIG ----------------
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = os.getenv("DB_NAME", "mcp_auth")
 REQUEST_TIMEOUT = float(os.getenv("REQUEST_TIMEOUT", "10"))
@@ -31,11 +32,15 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="MCP Gateway (Session Auth + Policy)")
 
+# ---------------- MODELS ----------------
 class LoginRequest(BaseModel):
     username: str
     password: str
 
-# Session helpers (simple DB-backed sessions)
+class LogoutRequest(BaseModel):
+    session_id: str
+
+# ---------------- SESSION HELPERS ----------------
 def create_session(username: str):
     session_id = str(uuid.uuid4())
     sessions_col.insert_one({
@@ -57,23 +62,22 @@ def verify_session(session_id: str):
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return session["username"]
 
-# Register (optional)
+# ---------------- AUTH ROUTES ----------------
 @app.post("/register")
 def register(req: LoginRequest):
     if users_col.find_one({"username": req.username}):
         raise HTTPException(status_code=400, detail="User already exists")
     hashed = pwd_context.hash(req.password)
     users_col.insert_one({"username": req.username, "password": hashed, "access": []})
-    return {"msg": "registered"}
+    return {"msg": "User registered successfully"}
 
-# Login
 @app.post("/login")
 def login(req: LoginRequest):
     user = users_col.find_one({"username": req.username})
     if not user or not pwd_context.verify(req.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
     session_id = get_or_create_session(req.username)
-    # Return username + access to client so client can render UI
     return {
         "message": "Login successful",
         "session_id": session_id,
@@ -81,24 +85,21 @@ def login(req: LoginRequest):
         "access": user.get("access", [])
     }
 
-# Logout
 @app.post("/logout")
-def logout(req: LoginRequest):
-    user = users_col.find_one({"username": req.username})
-    if not user or not pwd_context.verify(req.password, user["password"]):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    sessions_col.delete_one({"username": req.username})
-    return {"msg": f"User {req.username} logged out, session cleared"}
+def logout(req: LogoutRequest):
+    deleted = sessions_col.delete_one({"session_id": req.session_id})
+    if deleted.deleted_count == 0:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return {"msg": f"Session {req.session_id} cleared"}
 
-# Assign access to a user (admin helper)
-@app.post("/assign_server/{username}")
+# ---------------- USER ACCESS MGMT ----------------
+@app.post("/assign_server/{username}/{server}")
 def assign_server(username: str, server: str):
     if server not in BACKENDS:
         raise HTTPException(status_code=400, detail="Unknown server")
     users_col.update_one({"username": username}, {"$addToSet": {"access": server}})
-    return {"msg": f"assigned {server} to {username}"}
+    return {"msg": f"Assigned {server} to {username}"}
 
-# Get user access
 @app.get("/my_servers/{username}")
 def my_servers(username: str):
     user = users_col.find_one({"username": username})
@@ -106,13 +107,14 @@ def my_servers(username: str):
         raise HTTPException(status_code=404, detail="User not found")
     return {"access": user.get("access", [])}
 
-# Main MCP forward endpoint (JSON-RPC style expected)
+# ---------------- MCP FORWARD ----------------
 @app.post("/mcp")
 async def mcp_handler(request: Request):
     """
-    Client must call: POST /mcp?target=<backend>
-    Body must include session_id (top-level) OR in params.session_id.
-    The gateway verifies session -> checks user.access -> forwards to backend.
+    Forward JSON-RPC requests to the right backend.
+    Clients must include:
+      - ?target=<backend> (query param) OR params.target (in body)
+      - session_id (top-level or inside params)
     """
     target = request.query_params.get("target")
     body = await request.json()
@@ -138,7 +140,7 @@ async def mcp_handler(request: Request):
     if not backend_url:
         raise HTTPException(status_code=404, detail=f"No backend configured for {target}")
 
-    # Forward to backend, attach X-Forwarded-User
+    # Forward to backend
     try:
         headers = {"X-Forwarded-User": username, "Content-Type": "application/json"}
         resp = requests.post(backend_url, json=body, headers=headers, timeout=REQUEST_TIMEOUT)
@@ -149,4 +151,3 @@ async def mcp_handler(request: Request):
             return JSONResponse(content={"text": resp.text}, status_code=resp.status_code)
     except requests.exceptions.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Gateway forwarding failed: {str(e)}")
-
