@@ -310,7 +310,7 @@ def list_apps():
         apps.append(f"- {name} (ns: {ns}, sync: {sync}, health: {health})")
 
     return {"message": "Applications in Argo CD:\n" + "\n".join(apps)}
-    
+
 
 # ---- Health check ----
 @app.get("/health")
