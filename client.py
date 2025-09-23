@@ -1,21 +1,29 @@
+#!/usr/bin/env python3
+# client.py
 import os
 import json
 import time
+import re
 import requests
 import streamlit as st
 from dotenv import load_dotenv
-import google.generativeai as genai
 from typing import Optional, Dict, Any
-import re
+
+# Optional Gemini SDK
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
 
 # ---------------- CONFIG ----------------
 load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyC7iRO4NnyQz144aEc6RiVUNzjL9C051V8")
+API_URL = os.getenv("API_URL", "http://54.227.78.211:8080")   # auth_gateway.py endpoint
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 
-# Configure Gemini if available
+# Configure Gemini
 GEMINI_AVAILABLE = False
-if GEMINI_API_KEY:
+if GEMINI_API_KEY and genai:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         GEMINI_AVAILABLE = True
@@ -41,6 +49,24 @@ if "messages" not in st.session_state:
     st.session_state.available_servers = SERVERS
 
 # ---------------- HELPERS ----------------
+def api_post(path: str, payload: dict, target: Optional[str] = None) -> Dict[str, Any]:
+    """Wrapper to POST to auth_gateway + backend forwarding"""
+    url = f"{API_URL}{path}"
+    if target:
+        url += f"?target={target}"
+    try:
+        resp = requests.post(url, json=payload, timeout=30)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+def login_user(username: str, password: str) -> Dict[str, Any]:
+    return api_post("/login", {"username": username, "password": password})
+
+def logout_user(username: str, password: str) -> Dict[str, Any]:
+    return api_post("/logout", {"username": username, "password": password})
+
 def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> Dict[str, Any]:
     """Direct call to MCP server with JSON-RPC payload"""
     payload = {
@@ -84,6 +110,15 @@ def direct_mcp_call(server_url: str, method: str, params: Optional[Dict[str, Any
     except Exception as e:
         return {"error": f"Unexpected error: {str(e)}"}
 
+def list_tools(server: str) -> list:
+    """Fetch available MCP tools for a specific server"""
+    session_id = st.session_state.get("session_id")
+    if not session_id:
+        return []
+    payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "session_id": session_id}
+    resp = api_post("/mcp", payload, target=server)
+    return resp.get("result", {}).get("tools", [])
+
 def list_mcp_tools(server_url: str):
     """Fetch available MCP tools for a specific server."""
     resp = direct_mcp_call(server_url, "tools/list")
@@ -103,7 +138,20 @@ def list_mcp_tools(server_url: str):
     
     return []
 
-def call_tool(server_url: str, name: str, arguments: dict):
+def call_tool(server: str, tool: str, args: dict) -> Dict[str, Any]:
+    """Call an MCP tool through the gateway"""
+    session_id = st.session_state.get("session_id")
+    if not session_id:
+        return {"error": "Not logged in"}
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": args, "session_id": session_id},
+    }
+    return api_post("/mcp", payload, target=server)
+
+def call_tool_direct(server_url: str, name: str, arguments: dict):
     """Execute MCP tool by name with arguments."""
     if not name or not isinstance(arguments, dict):
         return {"error": "Invalid tool name or arguments"}
@@ -154,19 +202,6 @@ def sanitize_args(args: dict):
         fixed["resourceType"] = resource_mappings[fixed["resourceType"]]
     
     return fixed
-
-def _extract_json_from_text(text: str) -> Optional[dict]:
-    """Extract JSON object from free text."""
-    try:
-        # Find the first { and last }
-        start = text.find('{')
-        end = text.rfind('}') + 1
-        if start != -1 and end != -1 and end > start:
-            json_str = text[start:end]
-            return json.loads(json_str)
-    except Exception:
-        pass
-    return None
 
 def detect_server_from_query(query: str, available_servers: list) -> Optional[Dict[str, Any]]:
     """Automatically detect which server to use based on query content."""
@@ -225,7 +260,7 @@ def get_all_cluster_resources(server_url: str):
     
     for resource_type in resource_types:
         try:
-            response = call_tool(server_url, "kubectl_get", {
+            response = call_tool_direct(server_url, "kubectl_get", {
                 "resourceType": resource_type,
                 "allNamespaces": True
             })
@@ -247,7 +282,59 @@ def get_all_cluster_resources(server_url: str):
     
     return all_resources
 
-# ---------------- GEMINI FUNCTIONS ----------------
+def _extract_json_from_text(text: str) -> Optional[dict]:
+    """Extract JSON object from free text."""
+    try:
+        # Find the first { and last }
+        start = text.find('{')
+        end = text.rfind('}') + 1
+        if start != -1 and end != -1 and end > start:
+            json_str = text[start:end]
+            return json.loads(json_str)
+    except Exception:
+        pass
+    return None
+
+# ---------------- GEMINI HELPERS ----------------
+def ask_gemini_for_tool(query: str, tools: list) -> Dict[str, Any]:
+    """Ask Gemini (or fallback) to map user query to tool+args"""
+    if not tools:
+        return {"tool": None, "args": {}, "explanation": "No tools available"}
+
+    tool_names = [t.get("name") for t in tools if "name" in t]
+    instruction = f"""
+User query: "{query}"
+Available tools: {json.dumps(tool_names)}
+
+Rules:
+- Choose the tool and args that best answer the query.
+- If listing resources in Kubernetes, use kubectl_get with appropriate args.
+- Respond ONLY in JSON: {{"tool": "<tool>"|null, "args": {{}}|null, "explanation": "short"}}
+"""
+
+    if GEMINI_AVAILABLE:
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            resp = model.generate_content(instruction)
+            parsed = None
+            try:
+                parsed = json.loads(resp.text.strip())
+            except Exception:
+                parsed = None
+            return parsed or {"tool": None, "args": {}, "explanation": "Gemini gave invalid response"}
+        except Exception as e:
+            return {"tool": None, "args": {}, "explanation": f"Gemini error: {str(e)}"}
+
+    # Simple fallback
+    q = query.lower()
+    if "pod" in q:
+        return {"tool": "kubectl_get", "args": {"resourceType": "pods", "allNamespaces": True}, "explanation": "User wants pods"}
+    if "service" in q:
+        return {"tool": "kubectl_get", "args": {"resourceType": "services", "allNamespaces": True}, "explanation": "User wants services"}
+    if "job" in q:
+        return {"tool": "jenkins_list_jobs", "args": {}, "explanation": "User wants Jenkins jobs"}
+    return {"tool": None, "args": {}, "explanation": "No clear mapping found"}
+
 def ask_gemini_for_tool_decision(query: str, server_url: str):
     """Use Gemini to map user query -> MCP tool + arguments."""
     tools = list_mcp_tools(server_url)
@@ -332,6 +419,23 @@ Respond ONLY in strict JSON:
         
     except Exception as e:
         return {"tool": None, "args": None, "explanation": f"Gemini error: {str(e)}"}
+
+def format_answer(query: str, raw: dict) -> str:
+    """Convert raw MCP response into friendly text"""
+    if "error" in raw:
+        return f"⚠️ Error: {raw['error']}"
+
+    result = raw.get("result")
+    if isinstance(result, dict):
+        if "items" in result:
+            items = result["items"]
+            return f"Found {len(items)} items:\n" + "\n".join([f"- {i.get('metadata',{}).get('name','unnamed')}" for i in items])
+        if "jobs" in result:
+            return f"Jenkins Jobs:\n" + "\n".join([f"- {j['name']}" for j in result.get("jobs", [])])
+        if "applications" in result:
+            return f"ArgoCD Applications:\n" + "\n".join([f"- {a['name']}" for a in result.get("applications", [])])
+
+    return f"Response: {json.dumps(result, indent=2)}"
 
 def ask_gemini_answer(user_input: str, raw_response: dict) -> str:
     """Use Gemini to convert raw MCP response into human-friendly answer."""
@@ -466,9 +570,29 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
 
 # ---------------- STREAMLIT APP ----------------
 def main():
-    st.set_page_config(page_title="MCP Chat Assistant", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="MCP Assistant", page_icon="🤖", layout="wide")
     st.title("🤖 MaSaOps Bot")
 
+    # LOGIN FORM
+    if "session_id" not in st.session_state:
+        with st.form("login"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                resp = login_user(username, password)
+                if "session_id" in resp:
+                    st.session_state.session_id = resp["session_id"]
+                    st.session_state.username = resp["username"]
+                    st.session_state.access = resp.get("access", [])
+                    st.success(f"Logged in as {resp['username']}")
+                else:
+                    st.error(resp.get("detail", "Login failed"))
+        return
+
+    # LOGOUT BUTTON
+    st.sidebar.write(f"👤 {st.session_state.username}")
+    
     # Sidebar with settings
     with st.sidebar:
         st.header("⚙ Settings")
@@ -485,29 +609,42 @@ def main():
         if st.button("Clear Chat History"):
             st.session_state.messages = []
             st.rerun()
+            
+        if st.button("Logout"):
+            logout_user(st.session_state.username, "dummy")  # password optional in your gateway
+            st.session_state.clear()
+            st.rerun()
 
-    # Main chat interface
-    st.subheader("What's on your mind today? 🤔")
-    
-    # Display chat history
+    # Chat UI
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Show history
     for msg in st.session_state.messages:
-        role = msg.get("role", "assistant")
-        with st.chat_message(role):
-            st.markdown(msg.get("content", ""))
-    
-    # Chat input
-    user_prompt = st.chat_input("Ask anything about your infrastructure...")
-    if not user_prompt:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    # Input
+    user_input = st.chat_input("Ask something about your infrastructure...")
+    if not user_input:
         return
-    
-    # Add user message to history
-    st.session_state.messages.append({"role": "user", "content": user_prompt})
+
+    # Append user msg
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
-        st.markdown(user_prompt)
-    
+        st.markdown(user_input)
+
+    # Pick a server (first accessible for now)
+    if not st.session_state.access:
+        answer = "You have no servers assigned. Please ask admin to assign you one."
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        with st.chat_message("assistant"):
+            st.error(answer)
+        return
+
     # Auto-detect which server to use based on query
     with st.spinner("🔍 Finding the right server for your query..."):
-        selected_server = detect_server_from_query(user_prompt, SERVERS)
+        selected_server = detect_server_from_query(user_input, SERVERS)
     
     if not selected_server:
         error_msg = "No MCP servers available. Please check your servers.json file."
@@ -521,11 +658,18 @@ def main():
     st.session_state.messages.append({"role": "assistant", "content": server_info})
     with st.chat_message("assistant"):
         st.markdown(server_info)
+
+    # Use both methods for tool decision making
+    tools = list_tools(selected_server["name"])
+    decision = ask_gemini_for_tool(user_input, tools)
     
-    # Use Gemini to determine the best tool and arguments
-    with st.spinner("🤔 Analyzing your request..."):
-        decision = ask_gemini_for_tool_decision(user_prompt, selected_server["url"])
+    # Also use the enhanced decision maker
+    enhanced_decision = ask_gemini_for_tool_decision(user_input, selected_server["url"])
     
+    # Prefer enhanced decision if it found a tool, otherwise use basic decision
+    if enhanced_decision.get("tool"):
+        decision = enhanced_decision
+
     explanation = decision.get("explanation", "I'm figuring out how to help you...")
     st.session_state.messages.append({"role": "assistant", "content": f"💡 {explanation}"})
     with st.chat_message("assistant"):
@@ -537,22 +681,22 @@ def main():
     # Execute tool if one was selected
     if tool_name:
         with st.chat_message("assistant"):
-            st.markdown(f"🔧 Executing {tool_name}...")
+            st.markdown(f"🔧 Executing **{tool_name}** ...")
         
         # Special handling for "all resources" request
-        if (user_prompt.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
-            ("all" in user_prompt.lower() and "resource" in user_prompt.lower())):
+        if (user_input.lower().strip() in ["show me all resources in cluster", "get all resources", "all resources"] or
+            ("all" in user_input.lower() and "resource" in user_input.lower())):
             with st.spinner("🔄 Gathering all cluster resources (this may take a moment)..."):
                 all_resources = get_all_cluster_resources(selected_server["url"])
                 resp = {"result": all_resources}
         else:
-            # Call the tool normally
+            # Call the tool using the gateway method
             with st.spinner("🔄 Processing your request..."):
-                resp = call_tool(selected_server["url"], tool_name, tool_args)
+                resp = call_tool(selected_server["name"], tool_name, tool_args)
         
-        # Generate human-readable response
+        # Generate human-readable response using enhanced formatting
         with st.spinner("📝 Formatting response..."):
-            final_answer = ask_gemini_answer(user_prompt, resp)
+            final_answer = ask_gemini_answer(user_input, resp)
         
         # Add to chat history
         st.session_state.messages.append({"role": "assistant", "content": final_answer})
@@ -583,5 +727,6 @@ def main():
         with st.chat_message("assistant"):
             st.markdown(helpful_response)
 
-if _name_ == "_main_":
+
+if __name__ == "__main__":
     main()
