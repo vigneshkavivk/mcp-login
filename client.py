@@ -551,8 +551,9 @@ def extract_and_store_cluster_info(user_input: str, answer: str):
             patterns = [
                 r"cluster[^\w]*([\w-]+)",
                 r"name[^\w][:\-]?[^\w]([\w-]+)",
-                r"\([\w-]+)\",  # bolded name
+                r"\([\w-]+\)",  # bolded name
             ]
+
             for pattern in patterns:
                 match = re.search(pattern, answer, re.IGNORECASE)
                 if match:
